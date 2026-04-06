@@ -227,9 +227,10 @@ def show_leaderboard():
                 
         leaderboard_data.append({
             "OPERADOR": u["username"], 
-            "LIQUIDEZ": f"${cash:,.2f}", 
-            "RENTA VARIABLE": f"${equity:,.2f}", 
+            "MARGEN LIBRE": f"${cash:,.2f}", 
+            "MARGEN EN MERCADO": f"${equity:,.2f}", 
             "CAPITAL TOTAL": cash + equity
+            "RENTABILIDAD": (cash + equity)/1000000
         })
         
     lb_df = pd.DataFrame(leaderboard_data).sort_values(by="CAPITAL TOTAL", ascending=False).reset_index(drop=True)
