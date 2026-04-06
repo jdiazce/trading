@@ -100,7 +100,7 @@ def show_trading():
     with st.form(key="trading_form"):
         col1, col2 = st.columns(2)
         with col1:
-            ticker = st.text_input("TICKER (Ej: AAPL, SQM-B.SN, BTC-USD)").upper()
+            ticker = st.text_input("TICKER (Ej: AAPL, SQM-B.SN, etc)").upper()
             capital = st.number_input("CAPITAL A INVERTIR ($)", min_value=1.0, step=100.0)
         with col2:
             tp = st.number_input("TAKE PROFIT ($) (0 = N/A)", min_value=0.0, step=1.0)
