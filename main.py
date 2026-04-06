@@ -113,38 +113,37 @@ def show_trading():
     current_balance = float(db_utils.get_user_balance(user_id))
     st.metric("PODER DE COMPRA (CASH)", f"${current_balance:,.2f}")
     
-    ticker_input = st.text_input("BUSCAR ACTIVO (TICKER)").upper()
-    
-    if ticker_input:
-        stock = yf.Ticker(ticker_input)
-        hist = stock.history(period="1mo")
-        
-        if hist.empty:
-            st.error("ACTIVO NO ENCONTRADO O SIN VOLUMEN.")
-        else:
-            current_price = hist['Close'].iloc[-1]
-            st.info(f"PRECIO MERCADO (MARK-TO-MARKET): ${current_price:,.2f}")
+    with st.form(key="trading_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            ticker_input = st.text_input("TICKER (Ej: AAPL, SQM-B.SN)").upper()
+            capital = st.number_input("CAPITAL A INVERTIR ($)", min_value=1.0, step=100.0, max_value=float(current_balance) if current_balance > 0 else 1.0)
+        with col2:
+            tp = st.number_input("TAKE PROFIT ($) (0 = N/A)", min_value=0.0, step=1.0)
+            sl = st.number_input("STOP LOSS ($) (0 = N/A)", min_value=0.0, step=1.0)
             
-            # Gráfico de velas
-            fig = go.Figure(data=[go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'])])
-            fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=300, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="orange"))
-            fig.update_xaxes(showgrid=False)
-            fig.update_yaxes(showgrid=True, gridcolor="gray")
-            st.plotly_chart(fig, use_container_width=True)
-
-            with st.form(key="trading_form"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    capital = st.number_input("CAPITAL A INVERTIR ($)", min_value=1.0, step=100.0, max_value=current_balance)
-                with col2:
-                    tp = st.number_input("TAKE PROFIT ($) (0 = N/A)", min_value=0.0, step=1.0)
-                    sl = st.number_input("STOP LOSS ($) (0 = N/A)", min_value=0.0, step=1.0)
-                    
-                if st.form_submit_button("COMPRAR MKT"):
+        submit_trade = st.form_submit_button("EJECUTAR ORDEN MKT")
+        
+    if submit_trade and ticker_input:
+        st.info("PROCESANDO ORDEN...")
+        try:
+            stock = yf.Ticker(ticker_input)
+            hist = stock.history(period="1d")
+            
+            if hist.empty:
+                st.error("ACTIVO NO ENCONTRADO O SIN VOLUMEN.")
+            else:
+                current_price = hist['Close'].iloc[-1]
+                
+                if capital > current_balance:
+                    st.error("SALDO INSUFICIENTE PARA CUBRIR LA ORDEN.")
+                else:
                     db_utils.execute_trade(user_id, ticker_input, capital, current_price, tp, sl)
-                    st.success(f"ORDEN COMPLETADA: {capital/current_price:.4f} UNIDADES @ ${current_price:,.2f}")
+                    st.success(f"ORDEN COMPLETADA: {capital/current_price:.4f} UNIDADES DE {ticker_input} @ ${current_price:,.2f}")
                     st.session_state.user["cash_balance"] = current_balance - capital
                     st.rerun()
+        except Exception:
+            st.error("ERROR DE CONEXIÓN CON EL PROVEEDOR DE DATOS.")
 
 def show_portfolio():
     st.subheader("POSICIONES ABIERTAS (UNREALIZED)")
