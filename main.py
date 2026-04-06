@@ -1,44 +1,21 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import plotly.graph_objects as go
 import db_utils
 
-# Configuración de página y estética
+# 1. SETUP DE PÁGINA Y CSS
 st.set_page_config(page_title="Balleneros--Torneo semanal 1", layout="wide")
 
-# Inyección de CSS estilo Terminal Bloomberg
 bloomberg_css = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'Fira Code', 'Courier New', monospace !important;
-}
-
-h1, h2, h3 {
-    color: #FF9900 !important;
-    text-transform: uppercase;
-}
-
-[data-testid="stMetricValue"] {
-    color: #00FF00 !important;
-}
-
-[data-testid="stMetricLabel"] {
-    color: #FF9900 !important;
-}
-
-.stButton>button {
-    border: 1px solid #FF9900;
-    color: #FF9900;
-    background-color: transparent;
-    font-family: 'Fira Code', monospace;
-}
-
-.stButton>button:hover {
-    background-color: #FF9900;
-    color: #000000;
-}
+html, body, [class*="css"] { font-family: 'Fira Code', 'Courier New', monospace !important; }
+h1, h2, h3 { color: #FF9900 !important; text-transform: uppercase; }
+[data-testid="stMetricValue"] { color: #00FF00 !important; }
+[data-testid="stMetricLabel"] { color: #FF9900 !important; }
+.stButton>button { border: 1px solid #FF9900; color: #FF9900; background-color: transparent; }
+.stButton>button:hover { background-color: #FF9900; color: #000000; }
 </style>
 """
 st.markdown(bloomberg_css, unsafe_allow_html=True)
@@ -46,29 +23,73 @@ st.markdown(bloomberg_css, unsafe_allow_html=True)
 if "user" not in st.session_state:
     st.session_state.user = None
 
+# 2. MOTOR DE PRECIOS Y AUTO-LIQUIDACIÓN
+@st.cache_data(ttl=60) # Caché de 60 segundos para no saturar la API
+def fetch_market_prices(tickers):
+    if not tickers:
+        return {}
+    if len(tickers) == 1:
+        data = yf.Ticker(tickers[0]).history(period="1d")
+        return {tickers[0]: data['Close'].iloc[-1]} if not data.empty else {}
+    
+    # Batch download
+    data = yf.download(tickers, period="1d", group_by="ticker", threads=True)
+    prices = {}
+    for t in tickers:
+        try:
+            # yfinance returns different structures depending on ticker count
+            prices[t] = float(data[t]['Close'].iloc[-1]) if isinstance(data.columns, pd.MultiIndex) else float(data['Close'].iloc[-1])
+        except:
+            pass
+    return prices
+
+def check_auto_liquidations(user_id):
+    """Revisa si el precio de mercado ha tocado algún TP o SL y cierra la orden"""
+    open_trades = db_utils.get_open_transactions(user_id)
+    if not open_trades: return
+    
+    tickers = list(set([t['ticker'] for t in open_trades]))
+    prices = fetch_market_prices(tickers)
+    
+    for t in open_trades:
+        current_price = prices.get(t['ticker'])
+        if current_price:
+            tp = float(t['take_profit']) if t['take_profit'] else None
+            sl = float(t['stop_loss']) if t['stop_loss'] else None
+            
+            trigger_price = None
+            if tp and current_price >= tp: trigger_price = current_price
+            elif sl and current_price <= sl: trigger_price = current_price
+            
+            if trigger_price:
+                db_utils.close_trade(t['id'], user_id, t['quantity'], trigger_price)
+                st.toast(f"🚨 LIQUIDACIÓN AUTOMÁTICA: {t['ticker']} cerrado a ${trigger_price:,.2f}")
+
+# 3. NAVEGACIÓN Y RUTEO
 def main():
     st.title("BALLENEROS--TORNEO SEMANAL 1")
 
     if st.session_state.user is None:
         show_login()
     else:
-        menu = st.sidebar.radio("NAVEGACIÓN", ["Trading", "Mi Portafolio", "Leaderboard"])
+        # Forzar chequeo de TP/SL en segundo plano cada vez que navega
+        check_auto_liquidations(st.session_state.user["id"])
+        
+        menu = st.sidebar.radio("NAVEGACIÓN", ["Trading", "Mi Portafolio", "Historial (Blotter)", "Leaderboard"])
         st.sidebar.write("---")
         if st.sidebar.button("Cerrar Sesión"):
             st.session_state.user = None
             st.rerun()
 
-        if menu == "Trading":
-            show_trading()
-        elif menu == "Mi Portafolio":
-            show_portfolio()
-        elif menu == "Leaderboard":
-            show_leaderboard()
+        if menu == "Trading": show_trading()
+        elif menu == "Mi Portafolio": show_portfolio()
+        elif menu == "Historial (Blotter)": show_history()
+        elif menu == "Leaderboard": show_leaderboard()
 
+# 4. MÓDULOS DE INTERFAZ
 def show_login():
     st.subheader("SISTEMA DE ACCESO")
     tab1, tab2 = st.tabs(["INICIAR SESIÓN", "CREAR CUENTA"])
-    
     with tab1:
         log_user = st.text_input("USUARIO", key="log_user")
         log_pass = st.text_input("CONTRASEÑA", type="password", key="log_pass")
@@ -79,56 +100,54 @@ def show_login():
                 st.rerun()
             else:
                 st.error("CREDENCIALES INCORRECTAS.")
-                
     with tab2:
         reg_user = st.text_input("NUEVO USUARIO", key="reg_user")
         reg_pass = st.text_input("NUEVA CONTRASEÑA", type="password", key="reg_pass")
         if st.button("REGISTRAR"):
-            new_user = db_utils.register_user(reg_user, reg_pass)
-            if new_user:
-                st.success("CUENTA CREADA. AHORA PUEDES INICIAR SESIÓN.")
-            else:
-                st.error("EL USUARIO YA EXISTE.")
+            if db_utils.register_user(reg_user, reg_pass): st.success("CUENTA CREADA.")
+            else: st.error("EL USUARIO YA EXISTE.")
 
 def show_trading():
     st.subheader("TERMINAL DE EJECUCIÓN")
-    
     user_id = st.session_state.user["id"]
     current_balance = float(db_utils.get_user_balance(user_id))
     st.metric("PODER DE COMPRA (CASH)", f"${current_balance:,.2f}")
     
-    with st.form(key="trading_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            ticker = st.text_input("TICKER (En formato Yahoo Finance, Ej: AAPL, SQM-B.SN, etc)").upper()
-            capital = st.number_input("CAPITAL A INVERTIR ($)", min_value=1.0, step=100.0)
-        with col2:
-            tp = st.number_input("TAKE PROFIT ($) (0 = N/A)", min_value=0.0, step=1.0)
-            sl = st.number_input("STOP LOSS ($) (0 = N/A)", min_value=0.0, step=1.0)
-            
-        submit = st.form_submit_button("EJECUTAR ORDEN")
+    ticker_input = st.text_input("BUSCAR ACTIVO (TICKER)").upper()
+    
+    if ticker_input:
+        stock = yf.Ticker(ticker_input)
+        hist = stock.history(period="1mo")
         
-        if submit and ticker:
-            try:
-                stock = yf.Ticker(ticker)
-                todays_data = stock.history(period='1d')
-                if todays_data.empty:
-                    st.error("TICKER NO ENCONTRADO EN YFINANCE.")
-                else:
-                    current_price = todays_data['Close'].iloc[0]
+        if hist.empty:
+            st.error("ACTIVO NO ENCONTRADO O SIN VOLUMEN.")
+        else:
+            current_price = hist['Close'].iloc[-1]
+            st.info(f"PRECIO MERCADO (MARK-TO-MARKET): ${current_price:,.2f}")
+            
+            # Gráfico de velas
+            fig = go.Figure(data=[go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'])])
+            fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=300, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="orange"))
+            fig.update_xaxes(showgrid=False)
+            fig.update_yaxes(showgrid=True, gridcolor="gray")
+            st.plotly_chart(fig, use_container_width=True)
+
+            with st.form(key="trading_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    capital = st.number_input("CAPITAL A INVERTIR ($)", min_value=1.0, step=100.0, max_value=current_balance)
+                with col2:
+                    tp = st.number_input("TAKE PROFIT ($) (0 = N/A)", min_value=0.0, step=1.0)
+                    sl = st.number_input("STOP LOSS ($) (0 = N/A)", min_value=0.0, step=1.0)
                     
-                    if capital > current_balance:
-                        st.error("SALDO INSUFICIENTE PARA CUBRIR LA ORDEN.")
-                    else:
-                        db_utils.execute_trade(user_id, ticker, capital, current_price, tp, sl)
-                        st.success(f"ORDEN COMPLETADA: {capital/current_price:.4f} UNIDADES DE {ticker} @ ${current_price:,.2f}")
-                        st.session_state.user["cash_balance"] = current_balance - capital
-                        st.rerun()
-            except Exception:
-                st.error("ERROR DE CONEXIÓN CON EL PROVEEDOR DE DATOS.")
+                if st.form_submit_button("COMPRAR MKT"):
+                    db_utils.execute_trade(user_id, ticker_input, capital, current_price, tp, sl)
+                    st.success(f"ORDEN COMPLETADA: {capital/current_price:.4f} UNIDADES @ ${current_price:,.2f}")
+                    st.session_state.user["cash_balance"] = current_balance - capital
+                    st.rerun()
 
 def show_portfolio():
-    st.subheader("POSICIONES ABIERTAS")
+    st.subheader("POSICIONES ABIERTAS (UNREALIZED)")
     user_id = st.session_state.user["id"]
     transactions = db_utils.get_open_transactions(user_id)
     
@@ -136,70 +155,105 @@ def show_portfolio():
         st.info("NO HAY POSICIONES ACTIVAS.")
         return
         
+    tickers = list(set([t['ticker'] for t in transactions]))
+    market_prices = fetch_market_prices(tickers)
+    
     portfolio_data = []
     total_equity = 0
     
     for t in transactions:
-        try:
-            current_price = yf.Ticker(t['ticker']).history(period='1d')['Close'].iloc[0]
-            current_value = t['quantity'] * current_price
-            pnl_pct = ((current_price - t['price_at_execution']) / t['price_at_execution']) * 100
-            total_equity += current_value
-            
-            portfolio_data.append({
-                "ID": t['id'],
-                "TICKER": t['ticker'],
-                "INVERSIÓN": f"${t['capital_invested']:,.2f}",
-                "P.COMPRA": f"${t['price_at_execution']:,.2f}",
-                "P.ACTUAL": f"${current_price:,.2f}",
-                "RETORNO": f"{pnl_pct:.2f}%",
-                "VALOR ACTUAL": f"${current_value:,.2f}",
-                "TP": t['take_profit'],
-                "SL": t['stop_loss'],
-                "qty": t['quantity']
-            })
-        except:
-            pass
+        current_price = market_prices.get(t['ticker'], t['price_at_execution']) # Fallback al precio de compra si falla la red
+        current_value = float(t['quantity']) * float(current_price)
+        pnl_pct = ((float(current_price) - float(t['price_at_execution'])) / float(t['price_at_execution'])) * 100
+        total_equity += current_value
+        
+        portfolio_data.append({
+            "ID": t['id'],
+            "TICKER": t['ticker'],
+            "INVERSIÓN": f"${t['capital_invested']:,.2f}",
+            "P.COMPRA": f"${t['price_at_execution']:,.2f}",
+            "P.ACTUAL": f"${current_price:,.2f}",
+            "RETORNO %": f"{pnl_pct:.2f}%",
+            "VALOR ACTUAL": f"${current_value:,.2f}",
+            "TP": float(t['take_profit']) if t['take_profit'] else 0.0,
+            "SL": float(t['stop_loss']) if t['stop_loss'] else 0.0,
+            "qty": t['quantity']
+        })
 
     df = pd.DataFrame(portfolio_data)
-    if not df.empty:
-        st.dataframe(df.drop(columns=['ID', 'qty']), use_container_width=True)
+    st.dataframe(df.drop(columns=['ID', 'qty']), use_container_width=True)
     st.metric("VALOR NETO ACCIONES (NAV)", f"${total_equity:,.2f}")
     
     st.write("---")
     st.subheader("GESTIÓN DE RIESGO / CIERRE")
-    
-    opciones = {f"{row['TICKER']} (COMPRA @ ${row['P.COMPRA'].replace('$', '')})": row for row in portfolio_data}
+    opciones = {f"{row['TICKER']} (COMPRA @ {row['P.COMPRA']})": row for row in portfolio_data}
     seleccion = st.selectbox("SELECCIONE POSICIÓN", list(opciones.keys()))
     
     if seleccion:
         pos = opciones[seleccion]
         col1, col2 = st.columns(2)
-        
         with col1:
-            st.write("### MODIFICAR PARÁMETROS")
             with st.form("mod_form"):
-                new_tp = st.number_input("NUEVO TAKE PROFIT", value=float(pos['TP']) if pos['TP'] else 0.0)
-                new_sl = st.number_input("NUEVO STOP LOSS", value=float(pos['SL']) if pos['SL'] else 0.0)
-                if st.form_submit_button("ACTUALIZAR ÓRDENES"):
+                new_tp = st.number_input("NUEVO TAKE PROFIT", value=pos['TP'])
+                new_sl = st.number_input("NUEVO STOP LOSS", value=pos['SL'])
+                if st.form_submit_button("ACTUALIZAR LÍMITES"):
                     db_utils.update_tp_sl(pos['ID'], new_tp, new_sl)
                     st.success("PARÁMETROS ACTUALIZADOS.")
                     st.rerun()
-                    
         with col2:
-            st.write("### LIQUIDAR POSICIÓN")
             if st.button("VENDER A MERCADO (MKT)"):
-                current_market_price = float(pos['P.ACTUAL'].replace('$', '').replace(',', ''))
+                current_market_price = market_prices.get(pos['TICKER'])
                 db_utils.close_trade(pos['ID'], user_id, pos['qty'], current_market_price)
                 st.success(f"POSICIÓN LIQUIDADA @ ${current_market_price:,.2f}")
                 st.rerun()
 
+def show_history():
+    st.subheader("HISTORIAL DE OPERACIONES (REALIZED P&L)")
+    user_id = st.session_state.user["id"]
+    closed_trades = db_utils.get_closed_transactions(user_id)
+    
+    if not closed_trades:
+        st.info("AÚN NO HAS CERRADO NINGUNA OPERACIÓN.")
+        return
+        
+    history_data = []
+    total_realized = 0
+    
+    for t in closed_trades:
+        compra = float(t['price_at_execution'])
+        venta = float(t['close_price'])
+        qty = float(t['quantity'])
+        
+        pnl_usd = (venta - compra) * qty
+        pnl_pct = ((venta - compra) / compra) * 100
+        total_realized += pnl_usd
+        
+        history_data.append({
+            "FECHA APERTURA": t['timestamp'][:10],
+            "TICKER": t['ticker'],
+            "P.COMPRA": f"${compra:,.2f}",
+            "P.VENTA": f"${venta:,.2f}",
+            "P&L ($)": pnl_usd,
+            "P&L (%)": f"{pnl_pct:.2f}%"
+        })
+        
+    df = pd.DataFrame(history_data)
+    # Formateo condicional para el P&L en la tabla
+    df["P&L ($)"] = df["P&L ($)"].apply(lambda x: f"${x:,.2f}")
+    
+    st.dataframe(df, use_container_width=True)
+    st.metric("REALIZED P&L TOTAL", f"${total_realized:,.2f}", delta=f"${total_realized:,.2f}")
+
 def show_leaderboard():
     st.subheader("CLASIFICACIÓN GLOBAL")
-    st.write("PROCESANDO MARK-TO-MARKET...")
+    st.write("PROCESANDO BATCH DOWNLOAD...")
     
     users = db_utils.get_all_users()
     all_open_trades = db_utils.get_open_transactions()
+    
+    # Batch download de todos los activos vivos en el torneo
+    all_tickers = list(set([t['ticker'] for t in all_open_trades]))
+    market_prices = fetch_market_prices(all_tickers)
     
     leaderboard_data = []
     trade_performance = []
@@ -211,26 +265,26 @@ def show_leaderboard():
         
         equity = 0
         for t in user_trades:
-            try:
-                price = yf.Ticker(t['ticker']).history(period='1d')['Close'].iloc[0]
-                equity += (t['quantity'] * price)
+            price = market_prices.get(t['ticker'], t['price_at_execution'])
+            equity += (float(t['quantity']) * float(price))
+            
+            pnl_pct = ((float(price) - float(t['price_at_execution'])) / float(t['price_at_execution'])) * 100
+            trade_performance.append({
+                "OPERADOR": t['profiles']['username'],
+                "ACTIVO": t['ticker'],
+                "RETORNO": pnl_pct,
+                "INVERSIÓN": t['capital_invested']
+            })
                 
-                pnl_pct = ((price - t['price_at_execution']) / t['price_at_execution']) * 100
-                trade_performance.append({
-                    "OPERADOR": t['profiles']['username'],
-                    "ACTIVO": t['ticker'],
-                    "RETORNO": pnl_pct,
-                    "INVERSIÓN": t['capital_invested']
-                })
-            except:
-                pass
-                
+        total_capital = cash + equity
+        rentabilidad_pct = ((total_capital - 1000000) / 1000000) * 100
+        
         leaderboard_data.append({
             "OPERADOR": u["username"], 
             "MARGEN LIBRE": f"${cash:,.2f}", 
             "MARGEN EN MERCADO": f"${equity:,.2f}", 
-            "CAPITAL TOTAL": cash + equity
-            "RENTABILIDAD": (cash + equity)/1000000
+            "CAPITAL TOTAL": total_capital,
+            "RENTABILIDAD": f"{rentabilidad_pct:,.2f}%"
         })
         
     lb_df = pd.DataFrame(leaderboard_data).sort_values(by="CAPITAL TOTAL", ascending=False).reset_index(drop=True)
@@ -241,7 +295,6 @@ def show_leaderboard():
     
     if trade_performance:
         perf_df = pd.DataFrame(trade_performance)
-        
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("TOP 10 GANANCIAS (UNREALIZED)")

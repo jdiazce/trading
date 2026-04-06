@@ -28,7 +28,6 @@ def get_user_balance(user_id):
 
 def execute_trade(user_id, ticker, capital, price, tp, sl):
     qty = capital / price
-    
     supabase.table("transactions").insert({
         "user_id": user_id,
         "ticker": ticker,
@@ -47,14 +46,11 @@ def execute_trade(user_id, ticker, capital, price, tp, sl):
 
 def close_trade(transaction_id, user_id, qty, close_price):
     capital_returned = qty * close_price
-    
-    # Marcar como cerrada
     supabase.table("transactions").update({
         "status": "Cerrada",
         "close_price": close_price
     }).eq("id", transaction_id).execute()
     
-    # Devolver capital al balance
     current_balance = get_user_balance(user_id)
     new_balance = float(current_balance) + float(capital_returned)
     supabase.table("profiles").update({"cash_balance": new_balance}).eq("id", user_id).execute()
@@ -74,4 +70,8 @@ def get_open_transactions(user_id=None):
         response = supabase.table("transactions").select("*").eq("user_id", user_id).eq("status", "Abierta").execute()
     else:
         response = supabase.table("transactions").select("*, profiles(username)").eq("status", "Abierta").execute()
+    return response.data
+
+def get_closed_transactions(user_id):
+    response = supabase.table("transactions").select("*").eq("user_id", user_id).eq("status", "Cerrada").execute()
     return response.data

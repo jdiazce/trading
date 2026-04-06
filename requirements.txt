@@ -3,3 +3,4 @@ supabase
 yfinance
 pandas
 pytz
+plotly
